@@ -16,33 +16,6 @@ MAX_SENSOR_ERROR = 1348.0
 MAX_NO_DATA_VALS = 14319
 MAX_SEN1_ERRORS = 26214 # equivalent of 20% of values
 
-class SkippedCounter:
-    skipped_roi = 0
-    skipped_cloud = 0
-    skipped_shadow = 0
-    skipped_errors = 0
-    
-    @staticmethod
-    def increment_roi_counter():
-        SkippedCounter.skipped_roi += 1
-        
-    @staticmethod
-    def increment_cloud_counter():
-        SkippedCounter.skipped_cloud +=1
-        
-    @staticmethod
-    def increment_shadow_counter():
-        SkippedCounter.skipped_shadow += 1
-    @staticmethod
-    def increment_error_counter():
-        SkippedCounter.skipped_errors +=1
-    @staticmethod
-    def display_skipped():
-        print("skipped " + str(SkippedCounter.skipped_roi) + " files for being outside ROI")
-        print("skipped " + str(SkippedCounter.skipped_cloud) + " files for being too cloudy")
-        print("skipped " + str(SkippedCounter.skipped_shadow) + " files for being in shadow")
-        print("skipped " + str(SkippedCounter.skipped_errors) + " files having too many extreme values")
-        
 
 def replace_no_data_in_array(sentinel_data, array, replace_value=0):
   
@@ -52,23 +25,13 @@ def replace_no_data_in_array(sentinel_data, array, replace_value=0):
 
 # dataset contains products outside or on the edge of our region of interest. These have no or very little data so filtering out
 # any products which don't contain data for less than the percentage of the image defined by ROI_THRESHOLD at the top of this file
-def is_outside_roi(file_path):
+def is_outside_roi(rgb, no_data_value):
     
-    if type(file_path) is not str:
-        file_path = compat.as_text(file_path.numpy()) 
-    
-    sentinel_data =  rasterio.open(file_path)
-    
-    red = sentinel_data.read(4)
-    green = sentinel_data.read(3)
-    blue = sentinel_data.read(2)
+    no_data_vals =  tf.cast(tf.equal(rgb, no_data_value), tf.int32)
+    count_no_data_vals = tf.reduce_sum(no_data_vals)
     
     
-    rgb = np.dstack((red, green, blue)) 
-    # get number of no data values
-    amount_no_data = (rgb == sentinel_data.profile['nodata']).sum()  
-    
-    if amount_no_data > MAX_NO_DATA_VALS: 
+    if tf.math.greater(count_no_data_vals, MAX_NO_DATA_VALS): 
        return True
     
     return False
@@ -87,12 +50,10 @@ def has_significant_sensor_errors(rgb, max_expected_value):
 
 
 def filter_sentinel1_missing_data(file_path):
-    sen1 = tf.py_function(convert_sen1_product_to_tensor, inp=[file_path, False, False], Tout=[tf.float32])
-    no_data_value = tf.py_function(get_no_data_value, inp=[file_path], Tout=tf.float32)
-    
+    no_data_value, sen1 = tf.py_function(load_sen1_data, inp=[file_path], Tout=[tf.float32, [tf.float32]])
+     
     no_data_value_positions = tf.equal(sen1, no_data_value)
     no_data_count = tf.reduce_sum(tf.cast(no_data_value_positions, tf.int32))
-    
     
     if no_data_count > MAX_SEN1_ERRORS:
        return False
@@ -114,10 +75,11 @@ def get_no_data_value(file_path):
 # caused by sensor errors
 def filter_low_quality_data(file_path, max_expected_value=1348.0):
     tf.print(file_path)
-
-    # get rid of any images that contain pixels that have a high probablity of containing clouds
-    cloud_mask = tf.py_function(convert_sen2_product_to_cloud_mask_tensor, inp=[file_path], Tout=[tf.float32])
     
+    # load all the data I need at once to reduce inefficient py_function calls
+    no_data_value, rgb, rgb_with_no_data_vals, cloud_mask, cloud_shadow = tf.py_function((load_sen2_data, inp=[file_path], Tout=[tf.float32, [tf.float32],[tf.float32],[tf.float32],[tf.float32]]
+    
+    # get rid of any images that contain pixels that have a high probablity of containing cloud    
     if tf.math.greater(tf.math.count_nonzero(cloud_mask),ACCEPTABLE_CLOUD_MASK_SIZE):
       return False
     
@@ -127,19 +89,50 @@ def filter_low_quality_data(file_path, max_expected_value=1348.0):
     if tf.math.greater(tf.math.count_nonzero(cloud_shadow_mask),ACCEPTABLE_CLOUD_SHADOW_SIZE):
       return False
     
-    if tf.py_function(is_outside_roi, inp=[file_path], Tout=bool):
+    if is_outside_roi(rgb_with_no_data_vals, no_data_value):
         return False
     
-    rgb = tf.py_function(convert_sen2_product_to_rgb_tensor, inp=[file_path], Tout=[tf.float32])
-    rgb = tf.reshape(rgb, [256, 256, 3])
+   
     # check image doesn't have too many values that seem erroneously high that may have been caused by a sensor error
     if has_significant_sensor_errors(rgb, max_expected_value):
         return False
     
     return filter_sentinel1_missing_data(file_path)
     
+# combine loading everything related to sentinel 2 files into one function (as otherwise ended up closing and reopening same file lots of times)
+def load_sen2_data(file_path):
+    if type(file_path) is not str:
+        file_path = compat.as_text(file_path.numpy()) 
+        
+    sentinel_data =  rasterio.open(file_path)
     
+    no_data_value = sentinel_data.profile['nodata']
+                                                                           
+    red_with_no_data_vals = sentinel_data.read(4)
+    red = replace_no_data_in_array(sentinel_data, red_with_no_data_vals)
+    
+    green_with_no_data_vals = sentinel_data.read(3)
+    green = replace_no_data_in_array(sentinel_data, green_with_no_data_vals)
+    
+    blue_with_no_data_vals = sentinel_data.read(4)
+    blue = replace_no_data_in_array(sentinel_data, blue_with_no_data_vals)
+    
+    rgb = tf.convert_to_tensor(np.dstack((red, green, blue)))   
+    rgb_with_no_data_vals = tf.convert_to_tensor(np.dstack((red_with_no_data_vals, green_with_no_data_vals, blue_with_no_data_vals)))   
+    
+    
+    med_prob_cloud = replace_no_data_in_array(sentinel_data, sentinel_data.read(16))
+    high_prob_cloud = replace_no_data_in_array(sentinel_data, sentinel_data.read(17))
+    cirrus_cloud = replace_no_data_in_array(sentinel_data, sentinel_data.read(18))
+    
+    cloud_mask = tf.convert_to_tensor(np.dstack((med_prob_cloud, high_prob_cloud, cirrus_cloud)))
+    
+    cloud_shadow = replace_no_data_in_array(sentinel_data, sentinel_data.read(15))
 
+    sentinel_data.close()
+    
+    return no_data_value, rgb, rgb_with_no_data_vals, cloud_mask, cloud_shadow
+    
 # have multiple bands with different cloud information (13 - opaque clouds, 14 cirrus clouds, 15 cloud shadow, 16 medium prob cloud,
 # 17 high prob cloud, 18 thin cirrus). I just use 17-18 which can identify images with most obvious clouds
 def convert_sen2_product_to_cloud_mask_tensor(file_path):
@@ -217,7 +210,23 @@ def convert_sen2_product_to_rgb_tensor(file_path, outlier_max_threshold=0, outli
     sentinel_data.close()
     
     return tf.convert_to_tensor(rgb)
-                                             
+
+def load_sen1_data(file_path):
+    if type(file_path) is not str:
+        file_path = compat.as_text(file_path.numpy()) 
+
+    sentinel_data =  rasterio.open(file_path)
+    
+    vh = sentinel_data.read(1)
+    vv = sentinel_data.read(2)
+                                                                                          
+    sen1 = tf.convert_to_tensor(np.dstack((vh,vv)))
+                                                                                          
+    no_data_value = sentinel_data.profile['nodata']
+    sentinel_data.close()
+                                                                                          
+    return float(no_data_value), sen1
+                                                                                          
 def convert_sen1_product_to_tensor(file_path, include_ratio = False, replace_no_data = True):
     if type(file_path) is not str:
         file_path = compat.as_text(file_path.numpy()) 
