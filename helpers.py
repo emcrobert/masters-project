@@ -5,7 +5,10 @@ import pandas as pd
 import tensorflow as tf
 import sys
 import pprint
+from datetime import datetime
 
+DATASET_ROOT_PATH = '../../data/HiltonOfFern_crop_field_training_cloud_free_available_area'
+CLIP_VALUE = 1811.6
 
 
 # Value is equivalent to 10% of a 256x256 image, will probably need to adjust this value if ever use a different image size!
@@ -16,7 +19,59 @@ MAX_SENSOR_ERROR = 1348.0
 MAX_NO_DATA_VALS = 14319
 MAX_SEN1_ERRORS = 26214 # equivalent of 20% of values
 
+def build_dataset(include_ratio, small_testing_dataset=False):
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    tf.print("Started building dataset at ", current_time)
+    
+    # load list of our sentinel 2 files in random order (so when we split data later we get representative distributions rather than images next to each other - seed randomiser so my work is repeatable!) 
+    list_ds = tf.data.Dataset.list_files(DATASET_ROOT_PATH + '/*/*/S2/Patches/*.tif', shuffle=True, seed=42)
+    
 
+    if small_testing_dataset:
+        total_products = tf.data.experimental.cardinality(list_ds).numpy()
+        test_size = int(total_products * 0.90)
+        list_ds = list_ds.skip(test_size)
+
+
+    # remove Sentinel 2 images which are cloudy, covered in shadow, have lots of missing data or sensor errors and Sentinel 1 images that have lots of missing data
+    # do all filtering in one Frankenstein function so only have to count dataset size once 
+    list_ds = list_ds.filter(filter_low_quality_data)
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    tf.print("finished filtering at ", current_time)
+    # unfortunately after filtering tensorflow no longer knows how many items are in dataset and can no longer iterate through it due to this. So have to manually count items and set value
+    count = list_ds.reduce(0, lambda x, _: x + 1).numpy()
+    tf.print("after filtering have " + str(count) + " files")
+    list_ds = list_ds.apply(tf.data.experimental.assert_cardinality(count))
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    tf.print("finished fixing cardinality at ", current_time)
+    
+
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    tf.print("Have filtered dataset at ", current_time)
+
+    
+    # now actually load info from Sentinel files = create 2 datasets, one that includes the VH/VV ratio for Sentinel 1 files and 1 without)
+    list_ds = list_ds.map(lambda x: process_path(x, CLIP_VALUE, "clip", 0, include_ratio ), num_parallel_calls=tf.data.AUTOTUNE)
+    list_ds.apply(tf.data.experimental.ignore_errors())
+    
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    tf.print("Have processed dataset at ", current_time)
+
+    
+    # split into test, train, validation and verification sets
+    train, val, test, ver = split_dataset(list_ds, tf.data.experimental.cardinality(list_ds).numpy())
+    
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    tf.print("Have finished splitting dataset at ", current_time)
+    
+    return train, val, test, ver
+    
 def replace_no_data_in_array(sentinel_data, array, replace_value=0):
   
   array[array == sentinel_data.profile['nodata']] = replace_value
@@ -50,7 +105,7 @@ def has_significant_sensor_errors(rgb, max_expected_value):
 
 
 def filter_sentinel1_missing_data(file_path):
-    no_data_value, sen1 = tf.py_function(load_sen1_data, inp=[file_path], Tout=[tf.float32, [tf.float32]])
+    [no_data_value, sen1] = tf.py_function(load_sen1_data, inp=[file_path], Tout=[tf.float32, tf.float32])
      
     no_data_value_positions = tf.equal(sen1, no_data_value)
     no_data_count = tf.reduce_sum(tf.cast(no_data_value_positions, tf.int32))
@@ -58,7 +113,6 @@ def filter_sentinel1_missing_data(file_path):
     if no_data_count > MAX_SEN1_ERRORS:
        return False
 
-    tf.print("Passed all filtering tests and keeping file")
     return True
     
 
@@ -74,19 +128,16 @@ def get_no_data_value(file_path):
 # not interested in products which have cloud cover or cloud shadows,have very little data as they were outside our region of interest or have too many extreme values that are probably 
 # caused by sensor errors
 def filter_low_quality_data(file_path, max_expected_value=1348.0):
-    tf.print(file_path)
     
     # load all the data I need at once to reduce inefficient py_function calls
-    no_data_value, rgb, rgb_with_no_data_vals, cloud_mask, cloud_shadow = tf.py_function((load_sen2_data, inp=[file_path], Tout=[tf.float32, [tf.float32],[tf.float32],[tf.float32],[tf.float32]]
+    [no_data_value, rgb, rgb_with_no_data_vals, cloud_mask, cloud_shadow] = tf.py_function(load_sen2_data, inp=[file_path], Tout=[tf.float32, tf.float32,tf.float32,tf.float32,tf.float32])
     
     # get rid of any images that contain pixels that have a high probablity of containing cloud    
     if tf.math.greater(tf.math.count_nonzero(cloud_mask),ACCEPTABLE_CLOUD_MASK_SIZE):
       return False
     
     # get rid of any images that are in the shadow of a cloud
-    cloud_shadow_mask = tf.py_function(convert_sen2_product_to_cloud_shadow_mask_tensor, inp=[file_path], Tout=[tf.float32])
-    
-    if tf.math.greater(tf.math.count_nonzero(cloud_shadow_mask),ACCEPTABLE_CLOUD_SHADOW_SIZE):
+    if tf.math.greater(tf.math.count_nonzero(cloud_shadow),ACCEPTABLE_CLOUD_SHADOW_SIZE):
       return False
     
     if is_outside_roi(rgb_with_no_data_vals, no_data_value):
@@ -242,13 +293,15 @@ def convert_sen1_product_to_tensor(file_path, include_ratio = False, replace_no_
     
     sentinel_data.close()
     
+    vv = tf.convert_to_tensor(vv)
+    vh = tf.convert_to_tensor(vh)
     if include_ratio:
-        ratio = vh / vv
-        sen1 = np.dstack((vh,vv, ratio))
+        ratio = tf.math.divide_no_nan(vh, vv)
+        sen1 = tf.experimental.numpy.dstack((vh,vv, ratio))
     else:    
-        sen1 = np.dstack((vh,vv)) 
+        sen1 = tf.experimental.numpy.dstack((vh,vv)) 
         
-    return tf.convert_to_tensor(sen1)
+    return sen1
 
 def process_path(file_path, outlier_max_threshold=0, outlier_replacement_method="", outlier_min_threshold=0, include_ratio=False):
     
