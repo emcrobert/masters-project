@@ -31,7 +31,9 @@ def build_dataset(include_ratio, small_testing_dataset=False):
     if small_testing_dataset:
         total_products = tf.data.experimental.cardinality(list_ds).numpy()
         test_size = int(total_products * 0.90)
+        tf.print("skipping ", test_size)
         list_ds = list_ds.skip(test_size)
+        tf.print("dataset now has ", tf.data.experimental.cardinality(list_ds).numpy(), " products")
 
 
     # remove Sentinel 2 images which are cloudy, covered in shadow, have lots of missing data or sensor errors and Sentinel 1 images that have lots of missing data
@@ -41,9 +43,10 @@ def build_dataset(include_ratio, small_testing_dataset=False):
     current_time = now.strftime("%H:%M:%S")
     tf.print("finished filtering at ", current_time)
     # unfortunately after filtering tensorflow no longer knows how many items are in dataset and can no longer iterate through it due to this. So have to manually count items and set value
-    count = list_ds.reduce(0, lambda x, _: x + 1).numpy()
-    tf.print("after filtering have " + str(count) + " files")
-    list_ds = list_ds.apply(tf.data.experimental.assert_cardinality(count))
+    #count = list_ds.reduce(0, lambda x, _: x + 1).numpy()
+    list_ds = list_ds.apply(tf.data.experimental.assert_cardinality(len(list(list_ds))))
+    tf.print("after filtering have " + str(tf.data.experimental.cardinality(list_ds).numpy()) + " files")
+    #list_ds = list_ds.apply(tf.data.experimental.assert_cardinality(count))
     now = datetime.now()
     current_time = now.strftime("%H:%M:%S")
     tf.print("finished fixing cardinality at ", current_time)
@@ -92,7 +95,11 @@ def is_outside_roi(rgb, no_data_value):
     return False
  
 
-
+def test_can_iter(ds):
+    for cur_item in ds:
+        tf.print("sen 1 shape ", tf.shape(cur_item[0]), "sen 2 shape ", tf.shape(cur_item[1]))
+        
+    tf.print("succesfully iterated through full set")
 def has_significant_sensor_errors(rgb, max_expected_value):
     
     error_values =  tf.math.greater(rgb, max_expected_value)
@@ -308,8 +315,9 @@ def process_path(file_path, outlier_max_threshold=0, outlier_replacement_method=
     sen2 = tf.py_function(func=convert_sen2_product_to_rgb_tensor, inp=[file_path, outlier_max_threshold, outlier_replacement_method, outlier_min_threshold], Tout=[tf.float32]) 
     sen2 = tf.reshape(sen2, [256, 256, 3])
 
-    sen1_file_path = tf.strings.regex_replace(file_path, "/S2/", "/S1") # should there be another / after S1!!!
-    sen1 = tf.py_function(func=convert_sen1_product_to_tensor, inp=[file_path, include_ratio], Tout=[tf.float32])
+    sen1_file_path = tf.strings.regex_replace(file_path, "/S2/", "/S1/") # should there be another / after S1!!!
+    
+    sen1 = tf.py_function(func=convert_sen1_product_to_tensor, inp=[sen1_file_path, include_ratio], Tout=[tf.float32])
     if include_ratio:
         sen1 = tf.reshape(sen1, [256, 256, 3])
     else:
