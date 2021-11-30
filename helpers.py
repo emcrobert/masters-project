@@ -143,6 +143,9 @@ def filter_low_quality_data(file_path, max_expected_value=1348.0):
     if tf.math.greater(tf.math.count_nonzero(cloud_mask),ACCEPTABLE_CLOUD_MASK_SIZE):
       return False
     
+    # get rid of images with very low average values as they just appear as if they are black
+    if tf.math.less_equal(tf.math.reduce_mean(rgb), 100.0):
+        return False
     # get rid of any images that are in the shadow of a cloud
     if tf.math.greater(tf.math.count_nonzero(cloud_shadow),ACCEPTABLE_CLOUD_SHADOW_SIZE):
       return False
@@ -323,7 +326,7 @@ def process_path(file_path, outlier_max_threshold=0, outlier_replacement_method=
     else:
         sen1 = tf.reshape(sen1, [256, 256, 2])
     
-    return sen1, sen2
+    return sen1, sen2, file_path
 
 def split_dataset(dataset, dataset_size):
     train_size = int(0.7 * dataset_size)
