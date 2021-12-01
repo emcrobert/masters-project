@@ -1,24 +1,34 @@
 import numpy as np
 import tensorflow as tf
+import tensorflow_io as tfio
 import matplotlib.pyplot as plt
 import tensorflow.keras.metrics
+
+# takes a greyscale image and calculates blurriness by applying a Laplacian filter then calculating variance
+def blur_score(grey_img):
+    # apply filter
+    filter_size = tf.constant(3)
+    laplace = tfio.experimental.filter.laplacian(tf.expand_dims(grey_img, axis=0), filter_size)
+    return tf.math.reduce_std(laplace).numpy()
 
 def eval_test_set(model, test_ds, experiment_name):
     
     cur_best_psnr_score = 0
-    cur_best_mse_score = 0
     cur_best_fid_score = 0
     cur_best_ssim_score = 0
+    cur_best_blur_score = 0
+    
     
     cur_worst_psnr_score = 0
-    cur_worst_mse_score = 0
     cur_worst_fid_score = 0
     cur_worst_ssim_score = 0
+    cur_worst_blur_score = 0
     
     psnr_scores = np.array([])
     mse_scores = np.array([])
     fid_scores = np.array([])
     ssim_scores = np.array([])
+    blur_scores = np.array([])
     
 
     for cur_images in test_ds:
@@ -30,7 +40,9 @@ def eval_test_set(model, test_ds, experiment_name):
         # need to call expand dims as generator is used to receiving batches of images rather than a single image and similarly call squeeze as I get a batch of 1 back but just need image
         fake_sen2 = tf.squeeze(model.generator.predict(tf.expand_dims(sen1, axis=0)))
         fake_sen2 = (fake_sen2+1)/2
-       
+        
+        grey_fake = tf.image.rgb_to_grayscale(fake_sen2) # greyscale version of fake image using for calculating image sharpness and brightness
+        
         psnr = tf.image.psnr(real_sen2, fake_sen2, max_val=1.0).numpy()
        
         
@@ -45,8 +57,24 @@ def eval_test_set(model, test_ds, experiment_name):
             cur_worst_psnr_sen1 = sen1
             cur_worst_psnr_sen2 = real_sen2
             cur_worst_psnr_fake = fake_sen2 
-            tf.print("worst psnr score so far is", cur_worst_psnr_score , " for filename ", cur_images[2] )
         psnr_scores = np.append(psnr_scores, psnr)
+        
+        
+        blur = blur_score(grey_fake)
+        
+        if blur > cur_best_blur_score:
+            cur_best_blur_score = blur
+            cur_best_blur_sen1 = sen1
+            cur_best_blur_sen2 = real_sen2
+            cur_best_blur_fake = fake_sen2 
+        
+        if blur < cur_worst_psnr_score or cur_worst_psnr_score == 0:
+            cur_worst_blur_score = blur
+            cur_worst_blur_sen1 = sen1
+            cur_worst_blur_sen2 = real_sen2
+            cur_worst_blur_fake = fake_sen2 
+        
+        blur_scores = np.append(blur_scores, blur)
         """
         mse = tf.keras.metrics.mean_squared_error(real_sen2, fake_sen2).numpy()
         tf.print(mse)
@@ -64,10 +92,10 @@ def eval_test_set(model, test_ds, experiment_name):
         
         mse_scores = np.append(mse_scores, mse)
         """
-        ssim = tf.image.ssim(real_sen2, fake_sen2, max_val=1.0)
+        ssim = tf.image.ssim(real_sen2, fake_sen2, max_val=1.0).numpy()
         # get SSIM
         if ssim > cur_best_ssim_score:
-            cur_best_ssim_score = psnr
+            cur_best_ssim_score = ssim
             cur_best_ssim_sen1 = sen1
             cur_best_ssim_sen2 = real_sen2
             cur_best_ssim_fake = fake_sen2 
@@ -78,7 +106,7 @@ def eval_test_set(model, test_ds, experiment_name):
             cur_worst_ssim_sen2 = real_sen2
             cur_worst_ssim_fake = fake_sen2 
         
-        np.append(ssim_scores, ssim)
+        ssim_scores = np.append(ssim_scores, ssim)
         """
         # get FID
         if fid > cur_best_fid_score:
@@ -136,10 +164,25 @@ def eval_test_set(model, test_ds, experiment_name):
           
     # plot and save best/worst images
     filename = experiment_name + "_best_ssim"
-    plot_images("Best SSIM score " + str(cur_best_psnr_score), cur_best_ssim_sen1, cur_best_ssim_sen2, cur_best_ssim_fake, filename.replace(" ", "_"))
+    plot_images("Best SSIM score " + str(cur_best_ssim_score), cur_best_ssim_sen1, cur_best_ssim_sen2, cur_best_ssim_fake, filename.replace(" ", "_"))
     
     filename = experiment_name + "_worst_ssim"
     plot_images("Worst SSIM score " + str(cur_worst_ssim_score), cur_worst_ssim_sen1, cur_worst_ssim_sen2, cur_worst_ssim_fake, filename.replace(" ", "_"))
+    
+    blur_avg = np.average(blur_scores)
+    blur_std = np.std(blur_scores)  
+    
+    tf.print("Best blur scrore", cur_best_blur_score)
+    tf.print("worst blur score", cur_worst_blur_score)
+    tf.print("average blur", blur_avg)
+    tf.print("blur st deviation", blur_std)
+    
+     # plot and save best/worst images
+    filename = experiment_name + "_best_blur"
+    plot_images("Least blurry image: " + str(cur_best_blur_score), cur_best_blur_sen1, cur_best_blur_sen2, cur_best_blur_fake, filename.replace(" ", "_"))
+    
+    filename = experiment_name + "_worst_ssim"
+    plot_images("Blurriest image: " + str(cur_worst_blur_score), cur_worst_blur_sen1, cur_worst_blur_sen2, cur_worst_blur_fake, filename.replace(" ", "_"))
     # return metrics eg best worst fid,sim,psrn, average, std deviation?
         
         
