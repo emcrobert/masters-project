@@ -215,6 +215,7 @@ def plot_images(title, sen1, real_sen2, fake_sen2, filename):
     ax3.axis('off')
     ax3.imshow(fake_sen2)
     ax3.set_title("Generated Sentinel 2 Image")
-    plt.show()
     plt.savefig("saved_images/" + filename)
+    plt.show()
+    
     
